@@ -78,25 +78,28 @@ class Builder:
         })
 
 
-def write(path, rows, owner="alice_h", other="bobby42",
-          names=("Alice Hart", "Bobby")):
+def write(path, rows, owner=("alice_h", "Alice Hart"),
+          peers=(("bobby42", "Bobby"),)):
     """rows: (iso_time, handle, text, flags, guid, original_html_or_None)"""
     b = Builder()
-    people = {owner: b.presentity(owner, owner), other: b.presentity(other, owner)}
+    owner_handle, owner_name = owner
+    everyone = [(owner_handle, owner_name)] + list(peers)
+    uids = {h: b.presentity(h, owner_handle) for h, _ in everyone}
 
     msgs, times = [], []
     for iso, handle, text, flags, guid, original in rows:
         when = datetime.fromisoformat(iso).replace(tzinfo=timezone.utc)
         times.append(when)
-        msgs.append(b.message(people[handle], when, text, flags, guid, original))
+        msgs.append(b.message(uids[handle], when, text, flags, guid, original))
 
     msg_array = b.array(msgs)
-    participants = b.array([b.string(n) for n in names])
-    presentity_ids = b.array([b.string(owner), b.string(other)])
+    participants = b.array([b.string(n) for _, n in everyone])
+    presentity_ids = b.array([b.string(h) for h, _ in everyone])
     empty = b.string("")
 
     root = b.array([b.string("AIM"), empty, msg_array,
-                    b.array([people[other]]), empty, b.add(2), empty, empty])
+                    b.array([uids[h] for h, _ in peers]),
+                    empty, b.add(len(everyone)), empty, empty])
 
     metadata = b.dictionary([
         ("Participants", participants),
@@ -104,7 +107,7 @@ def write(path, rows, owner="alice_h", other="bobby42",
         ("StartTime", b.date(min(times))),
         ("Service", b.string("AOL Instant Messenger")),
         ("PresentityIDs", presentity_ids),
-        ("ChatRoom", empty),
+        ("ChatRoom", b.string("groupchat-1" if len(peers) > 1 else "")),
     ])
 
     plist = {
@@ -115,7 +118,7 @@ def write(path, rows, owner="alice_h", other="bobby42",
     }
     with open(path, "wb") as fh:
         plistlib.dump(plist, fh, fmt=plistlib.FMT_BINARY)
-    print(f"wrote {path} ({len(msgs)} messages)")
+    print("wrote %s (%d messages)" % (path, len(msgs)))
 
 
 if __name__ == "__main__":
@@ -135,21 +138,36 @@ if __name__ == "__main__":
         ("2008-03-02T19:52:30", "bobby42", "ha, that's the one", 1, None, None),
     ])
 
-    # file B: overlaps file A by one message (same GUID), then runs into April
+    # file B: same two people, overlaps A by one GUID -> must fold into ONE
+    # conversation with A, and the duplicate must be dropped
     write(f"{out}/Bobby_on_2008-03-02_at_19.05.ichat", [
         ("2008-03-02T19:05:40", "bobby42", "yeah, after 3", 1, SHARED, None),
         ("2008-04-11T08:15:00", "alice_h", "line one\nline two", 5, None, None),
         ("2008-04-11T08:59:00", "bobby42", "is now away", 1, None, None),
-        ("2008-04-11T09:40:00", "alice_h", "unicode check: café — naïve ✓", 5, None, None),
+        ("2008-04-11T09:40:00", "alice_h", "unicode check: caf\u00e9 \u2014 na\u00efve \u2713", 5, None, None),
     ])
 
-    # file C: a handle with no display name in Participants
-    write(f"{out}/stranger_on_2010-01-09.ichat", [
-        ("2010-01-09T22:10:00", "bobby42", "who is this", 1, None, None),
-        ("2010-01-09T22:11:00", "alice_h", "no idea", 5, None, None),
-    ], other="bobby42", names=("Alice Hart", ""))
+    # file C: a different correspondent -> its own conversation / own link
+    write(f"{out}/Carol_on_2009-06-20.ichat", [
+        ("2009-06-20T14:00:00", "carol_w", "did you get the files", 1, None, None),
+        ("2009-06-20T14:02:00", "alice_h", "yep, thanks", 5, None, None),
+        ("2011-02-01T11:30:00", "carol_w", "long time!", 1, None, None),
+    ], peers=(("carol_w", "Carol West"),))
 
-    # file D: not a valid archive at all -- must be skipped, not fatal
+    # file D: a group chat -> a third, separate conversation
+    write(f"{out}/group_on_2010-05-05.ichat", [
+        ("2010-05-05T17:00:00", "alice_h", "dinner thursday?", 5, None, None),
+        ("2010-05-05T17:01:00", "bobby42", "in", 1, None, None),
+        ("2010-05-05T17:03:00", "carol_w", "can't, travelling", 1, None, None),
+    ], peers=(("bobby42", "Bobby"), ("carol_w", "Carol West")))
+
+    # file E: a handle with no display name in Participants
+    write(f"{out}/stranger_on_2010-01-09.ichat", [
+        ("2010-01-09T22:10:00", "dmz9", "who is this", 1, None, None),
+        ("2010-01-09T22:11:00", "alice_h", "no idea", 5, None, None),
+    ], peers=(("dmz9", ""),))
+
+    # file F: not a valid archive at all -- must be skipped, not fatal
     with open(f"{out}/broken.ichat", "wb") as fh:
         fh.write(b"bplist00\x00\x00garbage")
     print("wrote broken.ichat (intentionally invalid)")

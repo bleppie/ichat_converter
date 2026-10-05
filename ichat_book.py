@@ -119,6 +119,7 @@ class Message:
     outgoing: bool
     guid: str
     source: str          # file it came from
+    convo: tuple = ()    # sorted peer handles (everyone but the account owner)
 
     @property
     def local(self) -> datetime:
@@ -225,7 +226,19 @@ def parse_file(path: str, keep_system: bool) -> tuple[list[Message], dict]:
             source=os.path.basename(path),
         ))
 
-    return out, {"service": service, "participants": participants, "names": names}
+    # Conversation identity = the set of people who aren't the account owner.
+    # Every transcript with the same peer set folds into one conversation,
+    # which is what makes "all my chats with X" a single page.
+    peers = [h.lower() for h in presentity_ids if h.lower() != owner_handle]
+    if not peers:
+        peers = sorted({m.handle.lower() for m in out
+                        if m.handle and m.handle.lower() != owner_handle})
+    convo = tuple(sorted(set(peers)))
+    for m in out:
+        m.convo = convo
+
+    return out, {"service": service, "participants": participants,
+                 "names": names, "owner": owner_handle}
 
 
 def collect(paths: list[str], overrides: dict[str, str], keep_system: bool):
@@ -243,6 +256,7 @@ def collect(paths: list[str], overrides: dict[str, str], keep_system: bool):
     seen: set[str] = set()
     names: dict[str, str] = {}
     services: Counter = Counter()
+    owners: Counter = Counter()
     skipped: list[tuple[str, str]] = []
     dupes = 0
 
@@ -255,6 +269,8 @@ def collect(paths: list[str], overrides: dict[str, str], keep_system: bool):
         names.update({k: v for k, v in meta["names"].items() if k not in names})
         if meta["service"]:
             services[meta["service"]] += 1
+        if meta.get("owner"):
+            owners[meta["owner"]] += 1
         for m in msgs:
             if m.guid in seen:                         # overlapping saved transcripts
                 dupes += 1
@@ -271,8 +287,45 @@ def collect(paths: list[str], overrides: dict[str, str], keep_system: bool):
     stats = {
         "files": len(files), "skipped": skipped, "dupes": dupes,
         "services": services, "names": names,
+        "owner": owners.most_common(1)[0][0] if owners else "",
     }
     return messages, stats
+
+
+def conversations(messages: list[Message], names: dict[str, str],
+                  overrides: dict[str, str]) -> list[dict]:
+    """Fold messages into one entry per participant set, newest activity first."""
+    groups: dict[tuple, list[Message]] = {}
+    for m in messages:
+        groups.setdefault(m.convo, []).append(m)
+
+    def label(handle: str) -> str:
+        return overrides.get(handle) or names.get(handle) or handle
+
+    out = []
+    for key, msgs in groups.items():
+        msgs.sort(key=lambda m: m.when)
+        people = [label(h) for h in key] or ["unknown"]
+        out.append({
+            "key": key,
+            "title": ", ".join(people),
+            "handles": list(key),
+            "messages": msgs,
+            "count": len(msgs),
+            "first": msgs[0].local,
+            "last": msgs[-1].local,
+            "days": len({m.local.date() for m in msgs}),
+        })
+    out.sort(key=lambda c: (-c["count"], c["title"].lower()))
+    for i, c in enumerate(out, 1):
+        c["file"] = f"{i:03d}-{slugify(c['title'])}.html"
+    return out
+
+
+def slugify(s: str) -> str:
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
+    s = re.sub(r"[^a-zA-Z0-9]+", "-", s).strip("-").lower()
+    return (s or "conversation")[:48]
 
 
 # --------------------------------------------------------------------------
@@ -463,6 +516,196 @@ def build_epub(messages: list[Message], stats: dict, out_path: str, title: str) 
     return {"chapters": len(chaps), "span": span, "people": people}
 
 
+HTML_CSS = """\
+:root {
+  --bg: #fbfbfa; --fg: #1d1d20; --muted: #8b8b95; --rule: #e6e6ea;
+  --accent: #3a5a8c; --card: #ffffff; --me: #f3f6fb;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #16161a; --fg: #e8e8ea; --muted: #8d8d98; --rule: #2a2a32;
+          --accent: #8fb0e0; --card: #1d1d23; --me: #22262f; }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif;
+}
+.wrap { max-width: 44rem; margin: 0 auto; padding: 2.2rem 1.2rem 5rem; }
+a { color: var(--accent); }
+h1 { font-size: 1.6rem; font-weight: 600; margin: 0 0 .25rem; letter-spacing: -.01em; }
+.sub { color: var(--muted); font-size: .88rem; margin: 0 0 1.8rem; }
+.back { display: inline-block; font-size: .85rem; margin-bottom: 1.1rem;
+        text-decoration: none; }
+.back:hover { text-decoration: underline; }
+
+input[type=search] {
+  width: 100%; padding: .6rem .8rem; margin-bottom: 1.4rem; font-size: .95rem;
+  border: 1px solid var(--rule); border-radius: 8px;
+  background: var(--card); color: var(--fg);
+}
+
+ul.convos { list-style: none; padding: 0; margin: 0; }
+ul.convos li { border-bottom: 1px solid var(--rule); }
+ul.convos a {
+  display: flex; justify-content: space-between; align-items: baseline;
+  gap: 1rem; padding: .85rem .2rem; text-decoration: none; color: inherit;
+}
+ul.convos a:hover { background: var(--card); }
+.name { font-weight: 600; }
+.who-meta { color: var(--muted); font-size: .8rem; text-align: right;
+            white-space: nowrap; }
+.count { font-variant-numeric: tabular-nums; }
+
+h2.day {
+  position: sticky; top: 0; background: var(--bg);
+  font-size: .76rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .1em; color: var(--muted);
+  margin: 2rem 0 .8rem; padding: .5rem 0 .35rem;
+  border-bottom: 1px solid var(--rule); z-index: 2;
+}
+.msg { display: flex; gap: .7rem; padding: .22rem .45rem; border-radius: 6px;
+       scroll-margin-top: 3.5rem; }
+.msg.me { background: var(--me); }
+.msg.gap { margin-top: 1.1rem; }
+time { color: var(--muted); font-size: .72rem; white-space: nowrap;
+       padding-top: .3rem; min-width: 4.4rem; font-variant-numeric: tabular-nums; }
+.body { flex: 1; min-width: 0; overflow-wrap: break-word; }
+.who { font-weight: 600; margin-right: .4rem; }
+.sys { color: var(--muted); font-style: italic; }
+.hidden { display: none; }
+.empty { color: var(--muted); font-style: italic; padding: 1rem .2rem; }
+footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule);
+         color: var(--muted); font-size: .78rem; }
+"""
+
+HTML_PAGE = """<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>{title}</title>
+<link rel="stylesheet" href="style.css"/>
+</head><body><div class="wrap">
+{body}
+</div>{script}</body></html>
+"""
+
+FILTER_JS = """
+<script>
+(function () {
+  var box = document.querySelector('input[type=search]');
+  if (!box) return;
+  var rows = Array.prototype.slice.call(document.querySelectorAll('[data-search]'));
+  var empty = document.querySelector('.empty');
+  box.addEventListener('input', function () {
+    var q = box.value.trim().toLowerCase();
+    var shown = 0;
+    rows.forEach(function (r) {
+      var hit = !q || r.getAttribute('data-search').indexOf(q) !== -1;
+      r.classList.toggle('hidden', !hit);
+      if (hit) shown++;
+    });
+    document.querySelectorAll('h2.day').forEach(function (h) {
+      var n = h.nextElementSibling, any = false;
+      while (n && n.tagName !== 'H2') {
+        if (!n.classList.contains('hidden')) { any = true; break; }
+        n = n.nextElementSibling;
+      }
+      h.classList.toggle('hidden', !any);
+    });
+    if (empty) empty.classList.toggle('hidden', shown > 0);
+  });
+})();
+</script>
+"""
+
+
+def render_html_messages(msgs: list[Message]) -> str:
+    parts: list[str] = []
+    day = None
+    prev: datetime | None = None
+    for m in msgs:
+        d = m.local.date()
+        if d != day:
+            day = d
+            parts.append(
+                f'<h2 class="day" id="d{d.isoformat()}">'
+                f'{html.escape(m.local.strftime("%A, %-d %B %Y"))}</h2>')
+            prev = None
+        gap = " gap" if prev and (m.local - prev).total_seconds() > GAP_MINUTES * 60 else ""
+        me = " me" if m.outgoing else ""
+        is_sys = m.text.startswith("[") and m.text.endswith("]")
+        body = html.escape(m.text).replace("\n", "<br/>")
+        search = html.escape(f"{m.sender} {m.text}".lower(), quote=True)
+        parts.append(
+            f'<div class="msg{me}{gap}" data-search="{search}">'
+            f'<time datetime="{m.local.isoformat()}" title="{m.local.strftime("%c")}">'
+            f'{m.local.strftime("%-I:%M %p").lower()}</time>'
+            f'<div class="body"><span class="who">{html.escape(m.sender)}</span>'
+            f'<span class="{"sys" if is_sys else "text"}">{body}</span></div></div>')
+        prev = m.local
+    return "\n".join(parts)
+
+
+def build_html(messages: list[Message], stats: dict, outdir: str, title: str,
+               overrides: dict[str, str]) -> dict:
+    convos = conversations(messages, stats["names"], overrides)
+    os.makedirs(outdir, exist_ok=True)
+
+    with open(os.path.join(outdir, "style.css"), "w", encoding="utf-8") as fh:
+        fh.write(HTML_CSS)
+
+    span = f'{messages[0].local:%B %Y} – {messages[-1].local:%B %Y}'
+    rows = []
+    for c in convos:
+        when = (f'{c["first"]:%b %Y}' if c["first"].strftime("%Y%m") ==
+                c["last"].strftime("%Y%m") else f'{c["first"]:%b %Y} – {c["last"]:%b %Y}')
+        search = html.escape(
+            f'{c["title"]} {" ".join(c["handles"])}'.lower(), quote=True)
+        rows.append(
+            f'<li data-search="{search}"><a href="{c["file"]}">'
+            f'<span class="name">{html.escape(c["title"])}</span>'
+            f'<span class="who-meta"><span class="count">{c["count"]:,}</span> '
+            f'message{"s" if c["count"] != 1 else ""} &middot; {html.escape(when)}'
+            f'</span></a></li>')
+
+    owner = stats.get("owner", "")
+    owner_name = stats["names"].get(owner, owner)
+    merged = (", %d duplicate messages merged" % stats["dupes"]) if stats["dupes"] else ""
+    index_body = (
+        f'<h1>{html.escape(title)}</h1>'
+        f'<p class="sub">{len(convos)} conversation{"s" if len(convos) != 1 else ""} '
+        f'&middot; {len(messages):,} messages &middot; {html.escape(span)}'
+        f'{" &middot; " + html.escape(owner_name) if owner_name else ""}</p>'
+        '<input type="search" placeholder="Filter conversations…" '
+        'autocomplete="off" spellcheck="false"/>'
+        f'<ul class="convos">{"".join(rows)}</ul>'
+        '<p class="empty hidden">No conversations match.</p>'
+        f'<footer>{stats["files"] - len(stats["skipped"])} transcript file(s) read'
+        f'{merged}. Times shown in this computer’s local timezone.</footer>')
+
+    with open(os.path.join(outdir, "index.html"), "w", encoding="utf-8") as fh:
+        fh.write(HTML_PAGE.format(title=html.escape(title),
+                                  body=index_body, script=FILTER_JS))
+
+    for c in convos:
+        when = f'{c["first"]:%-d %B %Y} – {c["last"]:%-d %B %Y}'
+        body = (
+            '<a class="back" href="index.html">← All conversations</a>'
+            f'<h1>{html.escape(c["title"])}</h1>'
+            f'<p class="sub">{c["count"]:,} messages across {c["days"]} day'
+            f'{"s" if c["days"] != 1 else ""} &middot; {html.escape(when)}<br/>'
+            f'{html.escape(", ".join(c["handles"]))}</p>'
+            '<input type="search" placeholder="Search this conversation…" '
+            'autocomplete="off" spellcheck="false"/>'
+            f'{render_html_messages(c["messages"])}'
+            '<p class="empty hidden">No messages match.</p>')
+        with open(os.path.join(outdir, c["file"]), "w", encoding="utf-8") as fh:
+            fh.write(HTML_PAGE.format(title=html.escape(c["title"]),
+                                      body=body, script=FILTER_JS))
+
+    return {"convos": convos, "span": span}
+
+
 def build_markdown(messages: list[Message], title: str) -> str:
     lines = [f"# {title}", ""]
     day = None
@@ -504,7 +747,10 @@ def main(argv=None) -> int:
         description="Convert legacy .ichat transcripts into one readable book.")
     ap.add_argument("paths", nargs="+", help=".ichat files and/or folders to walk")
     ap.add_argument("-o", "--out", help="output file (default: ichat-archive.<ext>)")
-    ap.add_argument("-f", "--format", choices=["epub", "md", "txt"], default="epub")
+    ap.add_argument("-f", "--format", choices=["html", "epub", "md", "txt"],
+                    default="html",
+                    help="html (default): a folder of linked pages, one per "
+                         "conversation; epub: one continuous book; md/txt: plain")
     ap.add_argument("-t", "--title", default="Archived Conversations")
     ap.add_argument("--names", nargs="*", default=[], metavar="handle=Name",
                     help="override handle -> display name")
@@ -528,8 +774,19 @@ def main(argv=None) -> int:
         print("No messages found. Nothing written.", file=sys.stderr)
         return 1
 
-    out = args.out or f"ichat-archive.{args.format}"
-    if args.format == "epub":
+    out = args.out or ("ichat-archive" if args.format == "html"
+                       else f"ichat-archive.{args.format}")
+    if args.format == "html":
+        info = build_html(messages, stats, out, args.title, overrides)
+        index = os.path.join(out, "index.html")
+        print(f"{index}  —  {len(info['convos'])} conversations, "
+              f"{len(messages):,} messages, {info['span']}")
+        for c in info["convos"][:12]:
+            print(f"    {c['count']:>7,}  {c['title']}")
+        if len(info["convos"]) > 12:
+            print(f"    {'':>7}  …and {len(info['convos']) - 12} more")
+        print(f"  open it:  open {index}")
+    elif args.format == "epub":
         info = build_epub(messages, stats, out, args.title)
         print(f"{out}  —  {len(messages):,} messages, "
               f"{info['chapters']} chapters, {info['span']}")

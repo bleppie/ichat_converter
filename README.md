@@ -1,20 +1,35 @@
 # ichat-book
 
-Turn a folder of legacy Apple iChat / Messages `.ichat` transcripts into one
-continuous, readable EPUB — chronological, chaptered by month, built for
-sitting down and reading rather than searching.
+Turn a folder of legacy Apple iChat / Messages `.ichat` transcripts into a
+browsable HTML archive — one link per conversation, timestamped messages
+inside — or into a single continuous EPUB.
 
-Zero dependencies (stock macOS `python3`). Nothing leaves your machine.
+Zero dependencies (stock `python3`). Nothing leaves your machine.
 
 ## Use
 
 ```bash
-python3 ichat_book.py ~/Documents/iChats -o archive.epub -t "Archived Conversations"
-python3 ichat_book.py ~/Documents/iChats -f md -o archive.md     # or txt
-python3 ichat_book.py ~/Documents/iChats --names somehandle="Their Name"
+# default: a folder of linked HTML pages, one page per conversation
+python3 ichat_book.py ~/Documents/iChats -o archive
+open archive/index.html
+
+# other formats
+python3 ichat_book.py ~/Documents/iChats -f epub -o archive.epub
+python3 ichat_book.py ~/Documents/iChats -f md   -o archive.md
+python3 ichat_book.py ~/Documents/iChats -f txt  -o archive.txt
 ```
 
-Then drop the `.epub` into Books / Kindle / any reader.
+## HTML output
+
+- `index.html` lists every conversation with message count and date range,
+  plus a live filter box.
+- One page per conversation, grouped by **who was in it** — every transcript
+  with the same participant set folds into a single page, so all your chats
+  with one person are under one link no matter how many files they came from.
+- Group chats become their own conversation, keyed by the full participant set.
+- Inside a page: sticky day headings, per-message timestamps, your own
+  messages tinted, and a search box that filters as you type.
+- Dark mode follows the system setting. No JS frameworks, no network calls.
 
 ## What it does
 
@@ -28,12 +43,16 @@ Then drop the `.epub` into Books / Kindle / any reader.
 - Skips unreadable files with a warning instead of aborting the run.
 - Timestamps at message granularity, rendered in the local timezone.
 
+Runs on Python 3.8+.
+
 ## Testing
 
 `make_fixture.py` builds synthetic `.ichat` archives from the format spec
-(not by copying a real file) covering dedupe, month splits, system lines,
-attachment-only messages, unnamed handles, unicode and a corrupt file:
+(not by copying real files), covering dedupe across overlapping transcripts,
+multiple correspondents, group chats, system lines, attachment-only messages,
+unnamed handles, unicode, multiline text and a corrupt file:
 
 ```bash
-python3 make_fixture.py /tmp/fixtures && python3 ichat_book.py /tmp/fixtures -f txt -o /tmp/out.txt
+python3 make_fixture.py /tmp/fixtures
+python3 ichat_book.py /tmp/fixtures -o /tmp/site && open /tmp/site/index.html
 ```
