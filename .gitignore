@@ -1,0 +1,4 @@
+*.epub
+*.pyc
+__pycache__/
+*.ichat
